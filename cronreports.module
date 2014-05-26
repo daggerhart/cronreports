@@ -1,0 +1,255 @@
+<?php
+
+/*
+ * Implements hook_menu()
+ */ 
+function cronreports_menu() {
+  $items = array();
+  $items['admin/build/cron/reports'] = array(
+    'title' => 'Reports',
+    'description' => '',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('cronreports_admin_form'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'cronreports.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 10,
+  );
+  
+  $items['admin/build/cron/reports/add'] = array(
+    'title' => 'Add Report',
+    'description' => '',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('cronreports_add_report_form'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'cronreports.admin.inc',
+    'type' => MENU_CALLBACK,
+   );
+  
+  $items['admin/build/cron/reports/edit/%'] = array(
+    'title' => 'Edit Report',
+    'description' => '',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('cronreports_edit_report_form',),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'cronreports.admin.inc',
+    'type' => MENU_CALLBACK,
+   );  
+  $items['admin/build/cron/reports/send/%'] = array(
+    'title' => 'Send Report',
+    'description' => '',
+    'page callback' => '_cronreports_admin_cron_job_handler',
+    'page arguments' => array(5),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'cronreports.admin.inc',
+    'type' => MENU_CALLBACK,
+   );  
+  return $items;
+}
+
+
+/*
+ * Implements hook_theme()
+ */
+function cronreports_theme($existing, $type, $theme, $path){
+  return array(
+    'cronreports_report' => array(
+      'template' => 'cronreports_report',
+      'arguments' => array(
+        'report' => array(),
+      ),
+      'pattern' => 'cronreports_report__',
+    ),
+    'cronreports_admin_reports' => array(
+      'arguments' => array(
+        'cronreports_reports' => array(),
+      ),
+      'file' => 'cronreports.admin.inc'
+    ),       
+    'cronreports_debug_message' => array(
+      'arguments' => array(
+        'report' => array(),
+      ),
+    ),
+  );
+}
+
+/*
+ * Implements hook_cronapi()
+ */
+function cronreports_cronapi($op, $job = NULL){
+  $cronreports_reports = variable_get('cronreports_reports', array());
+  
+  $items = array();
+  foreach ($cronreports_reports as $name => $report){
+    $items['cronreports_'.$name] = array(
+      'description' => '-',
+      // this can be overridden in elysia cron like any cron job
+      'rule' => variable_get('elysia_cron_default_rule', '0 * * * *'),
+      'callback' => 'cronreports_cron_job_handler',
+      'arguments' => array($name),
+      'weight' => 10001, // always last
+    );
+  }
+  
+  return $items;
+}
+
+
+/*
+ * Main cronreport callback for sending reports
+ * 
+ * @param string $report_name 
+ */
+function cronreports_cron_job_handler($report_name){
+  //watchdog('cronreports', 'Starting '.$report_name);
+  
+  // get the report
+  $cronreports_reports = variable_get('cronreports_reports', array());
+  
+  // run report if exists and enabled
+  if (isset($cronreports_reports[$report_name]) &&
+      $cronreports_reports[$report_name]['enabled'] == 1)
+  {
+    $report = $cronreports_reports[$report_name];
+    // make start time
+    $report['start_time'] = strtotime('-'.$report['time_offset']);
+    _cronreports_send_report($report);
+  }
+  
+  //watchdog('cronreports', 'Ending '.$report_name);
+}
+
+/*
+ * Admin send report
+ */
+function _cronreports_admin_cron_job_handler($report_name){
+  cronreports_cron_job_handler($report_name);
+  // send back to admin page
+  drupal_goto();
+}
+
+/*
+ * Send report email
+ * 
+ * @param array $report 
+ */
+function _cronreports_send_report($report) {
+  // normalize some data
+  $report['email_to'] = ($report['email_to']) ? $report['email_to'] : variable_get('cronreports_default_email_to', '');
+ 
+  // make sure required fields are set
+  if (!empty($report['email_to']) &&
+      !empty($report['watchdog_types']) &&
+      !empty($report['time_offset']))
+  {
+    // email message array
+    $message = array(
+      'to' => $report['email_to'],
+      'subject' => $report['name'] . ' watchdogs - '.date('d M Y g:i:s'),
+      'body' => '',
+      'headers' => array('From' => variable_get('site_mail', 'jonathan@shimshockgroup.com')),
+    );
+  
+    // get watchdog logs as array $report['results']
+    _cronreports_get_watchdog_logs($report);
+    
+    // check if this report should be skipped
+    if ($report['skip_empty'] == 1 &&
+        count($report['results']) == 0)
+    {
+      // log to watchdog
+      watchdog('cronreports', $report['name'].': report skipped on. ' .date('d M Y G:i:s'));
+      
+      // message for debug mode
+      if (variable_get('cronreports_debug_mode', 0)){
+        drupal_set_message($report['name'].': report skipped');
+      }
+      return;
+    }
+    
+    
+    // theme results.  allow pattern "cronreports_report__{$report[name]}.tpl.php' to override output
+    $message['body'] = theme(array('cronreports_report__' . $report['name'], 'cronreports_report'), $report);
+    
+    // if in debug mode, stop here
+    if (variable_get('cronreports_debug_mode', 0)){
+      return $message;    
+    }
+    
+    // only send an email if there is a body
+    if (!empty($message['body'])){
+      drupal_mail_send($message);
+      watchdog('cronreports', $report['name'].': report sent to '.$report['email_to']. ' on. ' .date('d M Y G:i:s'));
+    }
+    else {
+      watchdog('cronreports', $report['name'].': report failed due to no message.'. ' on. ' .date('d M Y G:i:s'));
+    }
+  }
+}
+
+/*
+ * Query for messages and build into array
+ *
+ * @param array $report 
+ *
+ * @return array of watchdog rows
+ */
+function _cronreports_get_watchdog_logs(&$report) {
+
+  // get the watchdog types for this cronreport
+  $watchdog_types = explode(',', $report['watchdog_types']);
+
+  // clean up whitespace
+  foreach($watchdog_types as $k => $type){
+    $watchdog_types[$k] = trim($type);
+  }
+  
+  // handle the specific types of watchdog logs by building an extra where condition
+  $sql = "SELECT *
+  FROM {watchdog}
+  WHERE `timestamp` >= %d
+  AND `type` IN('".implode("','", $watchdog_types)."')
+  ORDER BY `timestamp` ASC";
+
+  // start_time set in cronreports_cron_alter
+  $result = db_query($sql, $report['start_time']);
+
+  $rows = array();
+  while($log = db_fetch_object($result)){
+    $rows[] = $log;
+  }
+  $report['results'] = $rows;
+  
+  //
+  // give additional info back for debugging
+  // 
+  if (variable_get('cronreports_debug_mode', 0)){
+    // need to clean up the sql query to look normal in debug log
+    $replacements  = array(
+      "{watchdog}" => "`watchdog`",
+      "`%" => "`%%",
+      "%`" => "%%`",
+    );
+    $query = strtr($sql, $replacements);
+    $report['query'] = sprintf($query, $report['start_time']);
+    
+    
+    // debug message
+    $message.= theme('cronreports_debug_message', $report);
+    
+    drupal_set_message("<pre>".$message."</pre>");
+    watchdog('cronreports_debug', nl2br($message));
+  }
+}
+
+/*
+ * Debug message
+ */
+function theme_cronreports_debug_message($report){
+  $report['name'].": ".date('d M Y G:i:s', $report['start_time']) .' - '.date('d M Y G:i:s');
+  $message.= "\nfound ". count($report['results'])." rows. \n-----------------------------\n\n";
+  $message.= "sql query executed: \n".$report['query'];
+  return $message;
+}
+

@@ -1,0 +1,5 @@
+name = "Cron Reports"
+description = "Allows for the creation of email reports for each hook_cron or hook_cronapi in Elysia Cron."
+core = 6.x
+version = 6.x-1.0
+dependencies[] = elysia_cron
